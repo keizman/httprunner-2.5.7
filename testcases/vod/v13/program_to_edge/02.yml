@@ -1,0 +1,29 @@
+config:
+    name: api_test_case
+    base_url: http://httpbin.org
+    variables:
+        program_id: "67890"
+
+teststeps:
+    - name: Get program metadata
+      request:
+          method: GET
+          url: /get?action=metadata&program_id=${program_id}
+      validate:
+          - check: status_code
+            assert: equals
+            expect: 200
+    
+    - name: Update program metadata
+      request:
+          method: PUT
+          url: /put
+          json:
+              program_id: $program_id
+              metadata:
+                  title: "Updated Program"
+                  duration: 3600
+      validate:
+          - check: status_code
+            assert: equals
+            expect: 200

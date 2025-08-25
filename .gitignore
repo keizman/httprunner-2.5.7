@@ -1,0 +1,6 @@
+test_*.yaml
+*/__pycache__/
+*/*/__pycache__/
+*/*/*/__pycache__/
+/reports/
+test_rerun.sh

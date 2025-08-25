@@ -1,0 +1,389 @@
+import os
+import unittest
+
+from sentry_sdk import capture_message
+
+from httprunner import (__version__, exceptions, loader, logger, parser,
+                        report, runner, utils)
+
+
+class HttpRunner(object):
+    """ Developer Interface: Main Interface
+        Usage:
+
+            from httprunner.api import HttpRunner
+            runner = HttpRunner(
+                failfast=True,
+                save_tests=True,
+                log_level="INFO",
+                log_file="test.log"
+            )
+            summary = runner.run(path_or_tests)
+
+    """
+
+    def __init__(self, failfast=False, save_tests=False, log_level="WARNING", log_file=None, rerun=0):
+        """ initialize HttpRunner.
+
+        Args:
+            failfast (bool): stop the test run on the first error or failure.
+            save_tests (bool): save loaded/parsed tests to JSON file.
+            log_level (str): logging level.
+            log_file (str): log file path.
+            rerun (int): max number of reruns for failed tests.
+
+        """
+        logger.setup_logger(log_level, log_file)
+
+        self.exception_stage = "initialize HttpRunner()"
+        kwargs = {
+            "failfast": failfast,
+            "resultclass": report.HtmlTestResult
+        }
+        self.unittest_runner = unittest.TextTestRunner(**kwargs)
+        self.test_loader = unittest.TestLoader()
+        self.save_tests = save_tests
+        self.rerun = rerun
+        self._summary = None
+        self.project_working_directory = None
+
+    def _add_tests(self, testcases):
+        """ initialize testcase with Runner() and add to test suite.
+
+        Args:
+            testcases (list): testcases list.
+
+        Returns:
+            unittest.TestSuite()
+
+        """
+        def _add_test(test_runner, test_dict):
+            """ add test to testcase.
+            """
+            def test(self):
+                try:
+                    test_runner.run_test(test_dict)
+                except exceptions.MyBaseFailure as ex:
+                    self.fail(str(ex))
+                finally:
+                    self.meta_datas = test_runner.meta_datas
+
+            if "config" in test_dict:
+                # run nested testcase
+                test.__doc__ = test_dict["config"].get("name")
+                variables = test_dict["config"].get("variables", {})
+            else:
+                # run api test
+                test.__doc__ = test_dict.get("name")
+                variables = test_dict.get("variables", {})
+
+            if isinstance(test.__doc__, parser.LazyString):
+                try:
+                    parsed_variables = parser.parse_variables_mapping(variables)
+                    test.__doc__ = parser.parse_lazy_data(
+                        test.__doc__, parsed_variables
+                    )
+                except exceptions.VariableNotFound:
+                    test.__doc__ = str(test.__doc__)
+
+            return test
+
+        test_suite = unittest.TestSuite()
+        for testcase in testcases:
+            config = testcase.get("config", {})
+            # Add the testcase file path to config so it can be accessed later
+            if "path" in testcase:
+                config["path"] = testcase["path"]
+            test_runner = runner.Runner(config)
+            TestSequense = type('TestSequense', (unittest.TestCase,), {})
+
+            tests = testcase.get("teststeps", [])
+            for index, test_dict in enumerate(tests):
+                times = test_dict.get("times", 1)
+                try:
+                    times = int(times)
+                except ValueError:
+                    raise exceptions.ParamsError(
+                        "times should be digit, given: {}".format(times))
+
+                for times_index in range(times):
+                    # suppose one testcase should not have more than 9999 steps,
+                    # and one step should not run more than 999 times.
+                    test_method_name = 'test_{:04}_{:03}'.format(index, times_index)
+                    test_method = _add_test(test_runner, test_dict)
+                    setattr(TestSequense, test_method_name, test_method)
+
+            loaded_testcase = self.test_loader.loadTestsFromTestCase(TestSequense)
+            setattr(loaded_testcase, "config", config)
+            setattr(loaded_testcase, "teststeps", tests)
+            setattr(loaded_testcase, "runner", test_runner)
+            test_suite.addTest(loaded_testcase)
+
+        return test_suite
+
+    def _run_suite(self, test_suite):
+        """ run tests in test_suite
+
+        Args:
+            test_suite: unittest.TestSuite()
+
+        Returns:
+            list: tests_results
+
+        """
+        tests_results = []
+
+        for testcase in test_suite:
+            testcase_name = testcase.config.get("name")
+            logger.log_info("Start to run testcase: {}".format(testcase_name))
+
+            result = self.unittest_runner.run(testcase)
+            if result.wasSuccessful():
+                tests_results.append((testcase, result))
+            else:
+                tests_results.insert(0, (testcase, result))
+
+        return tests_results
+
+    def _aggregate(self, tests_results):
+        """ aggregate results
+
+        Args:
+            tests_results (list): list of (testcase, result)
+
+        """
+        summary = {
+            "success": True,
+            "stat": {
+                "testcases": {
+                    "total": len(tests_results),
+                    "success": 0,
+                    "fail": 0
+                },
+                "teststeps": {}
+            },
+            "time": {},
+            "platform": report.get_platform(),
+            "details": []
+        }
+
+        for tests_result in tests_results:
+            testcase, result = tests_result
+            testcase_summary = report.get_summary(result)
+
+            if testcase_summary["success"]:
+                summary["stat"]["testcases"]["success"] += 1
+            else:
+                summary["stat"]["testcases"]["fail"] += 1
+
+            summary["success"] &= testcase_summary["success"]
+            testcase_summary["name"] = testcase.config.get("name")
+            testcase_summary["path"] = testcase.config.get("path", "")
+            testcase_summary["in_out"] = utils.get_testcase_io(testcase)
+
+            report.aggregate_stat(summary["stat"]["teststeps"], testcase_summary["stat"])
+            report.aggregate_stat(summary["time"], testcase_summary["time"])
+
+            summary["details"].append(testcase_summary)
+
+        return summary
+
+    def run_tests(self, tests_mapping):
+        """ run testcase/testsuite data
+        """
+        capture_message("start to run tests")
+        project_mapping = tests_mapping.get("project_mapping", {})
+        self.project_working_directory = project_mapping.get("PWD", os.getcwd())
+
+        if self.save_tests:
+            utils.dump_logs(tests_mapping, project_mapping, "loaded")
+
+        # parse tests
+        self.exception_stage = "parse tests"
+        parsed_testcases = parser.parse_tests(tests_mapping)
+        parse_failed_testfiles = parser.get_parse_failed_testfiles()
+        if parse_failed_testfiles:
+            logger.log_warning("parse failures occurred ...")
+            utils.dump_logs(parse_failed_testfiles, project_mapping, "parse_failed")
+
+        if len(parsed_testcases) == 0:
+            logger.log_error("failed to parse all cases, abort.")
+            raise exceptions.ParseTestsFailure
+
+        if self.save_tests:
+            utils.dump_logs(parsed_testcases, project_mapping, "parsed")
+
+        # add tests to test suite
+        self.exception_stage = "add tests to test suite"
+        test_suite = self._add_tests(parsed_testcases)
+
+        # run test suite
+        self.exception_stage = "run test suite"
+        results = self._run_suite(test_suite)
+
+        # handle rerun for failed tests
+        if self.rerun > 0:
+            results = self._handle_rerun(results, parsed_testcases)
+
+        # aggregate results
+        self.exception_stage = "aggregate results"
+        self._summary = self._aggregate(results)
+
+        # generate html report
+        self.exception_stage = "generate html report"
+        report.stringify_summary(self._summary)
+
+        if self.save_tests:
+            utils.dump_logs(self._summary, project_mapping, "summary")
+            # save variables and export data
+            vars_out = self.get_vars_out()
+            utils.dump_logs(vars_out, project_mapping, "io")
+
+        return self._summary
+
+    def _handle_rerun(self, results, parsed_testcases):
+        """ handle rerun for failed tests
+        
+        Args:
+            results (list): list of (testcase, result) tuples
+            parsed_testcases (list): list of parsed testcase dictionaries
+            
+        Returns:
+            list: updated results with rerun attempts
+        """
+        if not self.rerun:
+            # Add rerun info even when no rerun is configured
+            for testcase, result in results:
+                if not hasattr(result, 'rerun_info'):
+                    result.rerun_info = {"attempts": 0, "max_reruns": 0}
+            return results
+            
+        rerun_count = 0
+        max_reruns = self.rerun
+        
+        while rerun_count < max_reruns:
+            failed_indices = []
+            failed_testcases = []
+            
+            # identify failed tests
+            for i, (testcase, result) in enumerate(results):
+                if result.failures or result.errors:
+                    failed_indices.append(i)
+                    failed_testcases.append(parsed_testcases[i])
+            
+            if not failed_indices:
+                # no failed tests, break the rerun loop
+                logger.log_info("All tests passed, no need for rerun.")
+                break
+                
+            rerun_count += 1
+            logger.log_info("Rerunning {} failed test(s), attempt {}/{}".format(
+                len(failed_indices), rerun_count, max_reruns))
+            
+            # create test suite for failed tests only
+            failed_test_suite = self._add_tests(failed_testcases)
+            
+            # run failed tests
+            rerun_results = self._run_suite(failed_test_suite)
+            
+            # update results with rerun results and add rerun info
+            for i, rerun_result in enumerate(rerun_results):
+                original_index = failed_indices[i]
+                testcase, result = rerun_result
+                
+                # Add rerun information to the result
+                if not hasattr(result, 'rerun_info'):
+                    result.rerun_info = {"attempts": rerun_count, "max_reruns": max_reruns}
+                else:
+                    result.rerun_info["attempts"] = rerun_count
+                    result.rerun_info["max_reruns"] = max_reruns
+                
+                results[original_index] = rerun_result
+                
+            # log rerun results
+            success_count = 0
+            for rerun_result in rerun_results:
+                if not (rerun_result[1].failures or rerun_result[1].errors):
+                    success_count += 1
+            
+            logger.log_info("Rerun attempt {}/{}: {} out of {} tests now passing".format(
+                rerun_count, max_reruns, success_count, len(rerun_results)))
+        
+        if rerun_count > 0:
+            logger.log_info("Completed {} rerun attempt(s)".format(rerun_count))
+            
+        return results
+
+    def get_vars_out(self):
+        """ get variables and output
+        Returns:
+            list: list of variables and output.
+                if tests are parameterized, list items are corresponded to parameters.
+
+                [
+                    {
+                        "in": {
+                            "user1": "leo"
+                        },
+                        "out": {
+                            "out1": "out_value_1"
+                        }
+                    },
+                    {...}
+                ]
+
+            None: returns None if tests not started or finished or corrupted.
+
+        """
+        if not self._summary:
+            return None
+
+        return [
+            summary["in_out"]
+            for summary in self._summary["details"]
+        ]
+
+    def run_path(self, path, dot_env_path=None, mapping=None):
+        """ run testcase/testsuite file or folder.
+
+        Args:
+            path (str): testcase/testsuite file/foler path.
+            dot_env_path (str): specified .env file path.
+            mapping (dict): if mapping is specified, it will override variables in config block.
+
+        Returns:
+            dict: result summary
+
+        """
+        # load tests
+        self.exception_stage = "load tests"
+        tests_mapping = loader.load_cases(path, dot_env_path)
+
+        if mapping:
+            tests_mapping["project_mapping"]["variables"] = mapping
+
+        return self.run_tests(tests_mapping)
+
+    def run(self, path_or_tests, dot_env_path=None, mapping=None):
+        """ main interface.
+
+        Args:
+            path_or_tests:
+                str: testcase/testsuite file/foler path
+                dict: valid testcase/testsuite data
+            dot_env_path (str): specified .env file path.
+            mapping (dict): if mapping is specified, it will override variables in config block.
+
+        Returns:
+            dict: result summary
+
+        """
+        logger.log_info("HttpRunner version: {}".format(__version__))
+        if loader.is_test_path(path_or_tests):
+            return self.run_path(path_or_tests, dot_env_path, mapping)
+        elif loader.is_test_content(path_or_tests):
+            project_working_directory = path_or_tests.get("project_mapping", {}).get("PWD", os.getcwd())
+            loader.init_pwd(project_working_directory)
+            return self.run_tests(path_or_tests)
+        else:
+            raise exceptions.ParamsError("Invalid testcase path or testcases: {}".format(path_or_tests))

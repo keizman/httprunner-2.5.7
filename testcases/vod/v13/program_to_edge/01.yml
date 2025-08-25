@@ -1,0 +1,48 @@
+config:
+    name: api_test_case
+    base_url: http://httpbin.org
+    variables:
+        program_id: "12345"
+        edge_id: "edge_001"
+
+teststeps:
+    - name: Get program information
+      request:
+          method: GET
+          url: /get?program_id=${program_id}
+          headers:
+              Content-Type: application/json
+      validate:
+          - check: status_code
+            assert: equals
+            expect: 200
+          - check: content.args.program_id
+            assert: equals
+            expect: $program_id
+    
+    - name: Push program to edge
+      request:
+          method: POST
+          url: /post
+          headers:
+              Content-Type: application/json
+          json:
+              program_id: $program_id
+              edge_id: $edge_id
+              action: "deploy"
+      validate:
+          - check: status_code
+            assert: equals
+            expect: 200
+          - check: content.json.program_id
+            assert: equals
+            expect: $program_id
+    
+    - name: Verify edge deployment
+      request:
+          method: GET
+          url: /get?edge_id=${edge_id}&program_id=${program_id}
+      validate:
+          - check: status_code
+            assert: equals
+            expect: 200

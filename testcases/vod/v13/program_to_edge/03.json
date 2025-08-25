@@ -1,0 +1,39 @@
+{
+    "config": {
+        "name": "api_test_case",
+        "base_url": "http://httpbin.org",
+        "variables": {
+            "program_id": "json_test_123",
+            "edge_location": "us-west-1"
+        }
+    },
+    "teststeps": [
+        {
+            "name": "JSON format test",
+            "request": {
+                "method": "POST",
+                "url": "/post",
+                "headers": {
+                    "Content-Type": "application/json"
+                },
+                "json": {
+                    "program_id": "$program_id",
+                    "edge_location": "$edge_location",
+                    "test_type": "json_format"
+                }
+            },
+            "validate": [
+                {
+                    "check": "status_code",
+                    "assert": "equals",
+                    "expect": 200
+                },
+                {
+                    "check": "content.json.program_id",
+                    "assert": "equals",
+                    "expect": "$program_id"
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,18 @@
+config:
+    name: VOD v13 Test Suite
+    base_url: http://httpbin.org
+
+testcases:
+    - name: Program to Edge Test Suite
+      testcase: program_to_edge/01.yml
+      parameters:
+          program_id: ["suite_test_1", "suite_test_2"]
+          edge_id: ["edge_suite_1", "edge_suite_2"]
+    
+    - name: Program Metadata Test Suite
+      testcase: program_to_edge/02.yml
+      parameters:
+          program_id: ["suite_meta_1", "suite_meta_2"]
+    
+    - name: JSON Format Test Suite
+      testcase: program_to_edge/03.json
