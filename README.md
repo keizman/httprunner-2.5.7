@@ -20,6 +20,12 @@ prompt:
 注意: 
 variables_af 中调用 update_test_variables 时，可能需要确保 test_variables_mapping 是最新的。
 variables_af 的实现，确保变量也被添加到 session_variables_mapping 中：
+
+function_regex_compile = re.compile(r"\$\{(\w+)\(([\$\w\s,\"'\[\]]*)\)\}")
+parser.py
+主要变化：
+•  添加了 \[ 和 \] 支持方括号
+•  移除了 \. 和 \-/= 一些不必要的字符，简化为核心需要的字符
 ```
 
 2025-08-25 添加 variables_af 功能，支持在 extract 之后执行变量赋值
